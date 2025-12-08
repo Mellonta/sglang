@@ -11,11 +11,10 @@ import time
 import weakref
 from collections.abc import Iterable
 from functools import lru_cache
-from typing import Any
+from typing import Any, Optional, Union
 
 import torch
 from einops import rearrange
-from tqdm.auto import tqdm
 
 from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.pipeline_configs.base import ModelTaskType, STA_Mode
@@ -51,8 +50,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     VerificationResult,
 )
 from sglang.multimodal_gen.runtime.platforms.interface import AttentionBackendEnum
@@ -61,6 +58,7 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
 from sglang.multimodal_gen.runtime.utils.profiler import SGLDiffusionProfiler
 from sglang.multimodal_gen.utils import dict_to_3d_list, masks_like
+from tqdm.auto import tqdm
 
 try:
     from sglang.multimodal_gen.runtime.layers.attention.backends.sliding_tile_attn import (
@@ -538,7 +536,9 @@ class DenoisingStage(PipelineStage):
             assert neg_prompt_embeds is not None
             # Removed Tensor truthiness assert to avoid GPU sync
 
-        boundary_timestep = self._handle_boundary_ratio(server_args, batch)
+        boundary_timestep: Unknown | None = self._handle_boundary_ratio(
+            server_args, batch
+        )
 
         # specifically for Wan2_2_TI2V_5B_Config, not applicable for FastWan2_2_TI2V_5B_Config
         should_preprocess_for_wan_ti2v = (
@@ -594,6 +594,8 @@ class DenoisingStage(PipelineStage):
             {
                 "encoder_hidden_states_2": batch.clip_embedding_pos,
                 "encoder_attention_mask": batch.prompt_attention_mask,
+                "pose_hidden_states": batch.extra["pose_hidden_states"],
+                "face_pixel_values": batch.extra["face_pixel_values"],
             }
             | server_args.pipeline_config.prepare_pos_cond_kwargs(
                 batch,
@@ -877,6 +879,135 @@ class DenoisingStage(PipelineStage):
 
         return latents
 
+    def get_i2v_mask(
+        self,
+        batch_size: int,
+        latent_t: int,
+        latent_h: int,
+        latent_w: int,
+        mask_len: int = 1,
+        dtype: torch.dtype = None,
+        device: Union[str, torch.device] = "cuda",
+    ) -> torch.Tensor:
+        # mask_pixel_values shape (if supplied): [B, C = 1, T, latent_h, latent_w]
+        mask_lat_size = torch.zeros(
+            batch_size,
+            1,
+            (latent_t - 1) * 4 + 1,
+            latent_h,
+            latent_w,
+            dtype=dtype,
+            device=device,
+        )
+        mask_lat_size[:, :, :mask_len] = 1
+        first_frame_mask = mask_lat_size[:, :, 0:1]
+        first_frame_mask = torch.repeat_interleave(first_frame_mask, dim=2, repeats=4)
+        mask_lat_size = torch.concat([first_frame_mask, mask_lat_size[:, :, 1:]], dim=2)
+        mask_lat_size = mask_lat_size.view(
+            batch_size, -1, 4, latent_h, latent_w
+        ).transpose(
+            1, 2
+        )  # [B, C = 1, 4 * T_lat, H_lat, W_lat] --> [B, C = 4, T_lat, H_lat, W_lat]
+
+        return mask_lat_size
+
+    def prepare_prev_segment_cond_latents(
+        self,
+        batch_size: int = 1,
+        segment_frame_length: int = 77,
+        start_frame: int = 0,
+        height: int = 720,
+        width: int = 1280,
+        prev_segment_cond_frames: int = 1,
+        interpolation_mode: str = "bicubic",
+        dtype=torch.float32,
+        device="cuda",
+    ) -> torch.Tensor:
+        # prev_segment_cond_video shape: (B, C, T, H, W) in pixel space if supplied
+        # background_video shape: (B, C, T, H, W) (same as prev_segment_cond_video shape)
+        # mask_video shape: (B, 1, T, H, W) (same as prev_segment_cond_video, but with only 1 channel)
+        cond_frames_shape = (
+            batch_size,
+            3,
+            prev_segment_cond_frames,
+            height,
+            width,
+        )  # In pixel space
+        prev_segment_cond_video = torch.zeros(
+            cond_frames_shape, dtype=dtype, device=device
+        )
+
+        data_batch_size, channels, _, segment_height, segment_width = (
+            prev_segment_cond_video.shape
+        )
+        num_latent_frames = (segment_frame_length - 1) // 4 + 1
+        latent_height = height // 8
+        latent_width = width // 8
+        if segment_height != height or segment_width != width:
+            print(
+                f"Interpolating prev segment cond video from ({segment_width}, {segment_height}) to ({width}, {height})"
+            )
+            # Perform a 4D (spatial) rather than a 5D (spatiotemporal) reshape, following the original code
+            prev_segment_cond_video = prev_segment_cond_video.transpose(1, 2).flatten(
+                0, 1
+            )  # [B * T, C, H, W]
+            prev_segment_cond_video = F.interpolate(
+                prev_segment_cond_video, size=(height, width), mode=interpolation_mode
+            )
+            prev_segment_cond_video = prev_segment_cond_video.unflatten(
+                0, (batch_size, -1)
+            ).transpose(1, 2)
+
+        remaining_segment_frames = segment_frame_length - prev_segment_cond_frames
+        remaining_segment = torch.zeros(
+            batch_size,
+            channels,
+            remaining_segment_frames,
+            height,
+            width,
+            dtype=dtype,
+            device=device,
+        )
+
+        # Prepend the conditioning frames from the previous segment to the remaining segment video in the frame dim
+        prev_segment_cond_video = prev_segment_cond_video.to(dtype=dtype)
+        full_segment_cond_video = torch.cat(
+            [prev_segment_cond_video, remaining_segment], dim=2
+        )
+
+        self.vae = self.vae.to(get_local_torch_device())
+        prev_segment_cond_latents = self.vae.encode(
+            full_segment_cond_video.float()
+        ).mean.float()
+        self.vae = self.vae.to("cpu")
+        # Standardize latents in preparation for Wan VAE encode
+        # latents_mean = prev_segment_cond_latents.view(
+        #     1, self.vae.config.z_dim, 1, 1, 1
+        # ).to(prev_segment_cond_latents.device, prev_segment_cond_latents.dtype)
+        # latents_recip_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(
+        #     1, self.vae.config.z_dim, 1, 1, 1
+        # ).to(prev_segment_cond_latents.device, prev_segment_cond_latents.dtype)
+        # prev_segment_cond_latents = (
+        #     prev_segment_cond_latents - latents_mean
+        # ) * latents_recip_std
+
+        # Prepare I2V mask
+        prev_segment_cond_mask = self.get_i2v_mask(
+            batch_size,
+            num_latent_frames,
+            latent_height,
+            latent_width,
+            mask_len=prev_segment_cond_frames if start_frame > 0 else 0,
+            dtype=dtype,
+            device=device,
+        )
+
+        # Prepend cond I2V mask to prev segment cond latents along channel dimension
+        prev_segment_cond_latents = torch.cat(
+            [prev_segment_cond_mask, prev_segment_cond_latents], dim=1
+        )
+        return prev_segment_cond_latents
+
     @torch.no_grad()
     def forward(
         self,
@@ -954,9 +1085,25 @@ class DenoisingStage(PipelineStage):
                                 not server_args.pipeline_config.task_type
                                 == ModelTaskType.TI2V
                             ), "image latents should not be provided for TI2V task"
+                            logger.info(
+                                f"[HZ] {latent_model_input.shape=} {batch.image_latent.shape=}"
+                            )
+                            aa = self.prepare_prev_segment_cond_latents()
+                            a = torch.zeros(
+                                [1, 20, 20, 90, 160],
+                                device=get_local_torch_device(),
+                                dtype=latent_model_input.dtype,
+                            )
+                            logger.info(f"[HZ] {aa=}")
+                            a = torch.cat([batch.image_latent, aa], dim=2).to(
+                                target_dtype
+                            )
                             latent_model_input = torch.cat(
-                                [latent_model_input, batch.image_latent], dim=1
+                                [latent_model_input, a], dim=1
                             ).to(target_dtype)
+                            # latent_model_input = torch.cat(
+                            #     [latent_model_input, batch.image_latent], dim=1
+                            # ).to(target_dtype)
 
                         timestep = self.expand_timestep_before_forward(
                             batch,

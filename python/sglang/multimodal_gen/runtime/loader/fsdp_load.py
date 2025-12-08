@@ -12,16 +12,6 @@ from itertools import chain
 from typing import Any
 
 import torch
-from torch import nn
-from torch.distributed import DeviceMesh, init_device_mesh
-from torch.distributed._tensor import distribute_tensor
-from torch.distributed.fsdp import (
-    CPUOffloadPolicy,
-    FSDPModule,
-    MixedPrecisionPolicy,
-    fully_shard,
-)
-from torch.nn.modules.module import _IncompatibleKeys
 
 from sglang.multimodal_gen.runtime.loader.utils import (
     get_param_names_mapping,
@@ -32,6 +22,16 @@ from sglang.multimodal_gen.runtime.loader.weight_utils import (
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import set_mixed_precision_policy
+from torch import nn
+from torch.distributed import DeviceMesh, init_device_mesh
+from torch.distributed._tensor import distribute_tensor
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    FSDPModule,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
+from torch.nn.modules.module import _IncompatibleKeys
 
 logger = init_logger(__name__)
 
@@ -251,6 +251,9 @@ def load_model_from_full_model_state_dict(
     custom_param_sd, reverse_param_names_mapping = hf_to_custom_state_dict(
         full_sd_iterator, param_names_mapping
     )  # type: ignore
+    # logger.info(f"[HZ] {custom_param_sd.keys()}")
+    # logger.info(f"[HZ] ============================")
+    # logger.info(f"[HZ] {meta_sd.keys()}")
     for target_param_name, full_tensor in custom_param_sd.items():
         meta_sharded_param = meta_sd.get(target_param_name)
         if meta_sharded_param is None:
@@ -278,7 +281,10 @@ def load_model_from_full_model_state_dict(
         logger.warning("Found unloaded parameters in meta state dict: %s", unused_keys)
 
     # List of allowed parameter name patterns
-    ALLOWED_NEW_PARAM_PATTERNS = ["gate_compress"]  # Can be extended as needed
+    ALLOWED_NEW_PARAM_PATTERNS = [
+        "gate_compress",
+        "norm_added_q",
+    ]  # Can be extended as needed
     for new_param_name in unused_keys:
         if not any(pattern in new_param_name for pattern in ALLOWED_NEW_PARAM_PATTERNS):
             logger.error(

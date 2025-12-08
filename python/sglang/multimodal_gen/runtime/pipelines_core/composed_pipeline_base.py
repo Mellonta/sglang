@@ -13,7 +13,6 @@ from abc import ABC, abstractmethod
 from typing import Any, cast
 
 import torch
-from tqdm import tqdm
 
 from sglang.multimodal_gen.configs.pipeline_configs import PipelineConfig
 from sglang.multimodal_gen.runtime.loader.component_loader import (
@@ -30,6 +29,7 @@ from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     verify_model_config_and_directory,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from tqdm import tqdm
 
 logger = init_logger(__name__)
 
@@ -316,6 +316,7 @@ class ComposedPipelineBase(ABC):
                 )
             else:
                 component_model_path = os.path.join(self.model_path, load_module_name)
+                logger.info(f"[HZ] {component_model_path=} {load_module_name=}")
             module = PipelineComponentLoader.load_module(
                 module_name=load_module_name,
                 component_model_path=component_model_path,

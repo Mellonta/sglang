@@ -17,9 +17,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from safetensors.torch import load_file as safetensors_load_file
-from torch.distributed import init_device_mesh
-from transformers import AutoImageProcessor, AutoProcessor, AutoTokenizer
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from sglang.multimodal_gen.configs.models import EncoderConfig, ModelConfig
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
@@ -44,6 +41,9 @@ from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
+from torch.distributed import init_device_mesh
+from transformers import AutoImageProcessor, AutoProcessor, AutoTokenizer
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 logger = init_logger(__name__)
 
@@ -155,6 +155,7 @@ class ComponentLoader(ABC):
             )
             source = "customized"
         except Exception as _e:
+            assert False, f"[HZ] {_e=}"
             # fallback to native version
             component = self.load_native(
                 component_model_path, server_args, transformers_or_diffusers

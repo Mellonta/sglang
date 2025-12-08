@@ -4,7 +4,7 @@
 import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
-from enum import Enum, auto
+from enum import auto, Enum
 from typing import Any
 
 import numpy as np
@@ -29,8 +29,8 @@ from sglang.multimodal_gen.runtime.models.vision_utils import get_default_height
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import (
     FlexibleArgumentParser,
-    StoreBoolean,
     shallow_asdict,
+    StoreBoolean,
 )
 
 logger = init_logger(__name__)
@@ -208,6 +208,7 @@ class PipelineConfig:
         spatial_compression_ratio = vae_arch_config.spatial_compression_ratio
         temporal_compression_ratio = vae_arch_config.temporal_compression_ratio
         num_frames = batch.num_frames
+        num_frames = 1
         latent_height = batch.height // spatial_compression_ratio
         latent_width = batch.width // spatial_compression_ratio
         mask_lat_size = torch.ones(1, 1, num_frames, latent_height, latent_width)

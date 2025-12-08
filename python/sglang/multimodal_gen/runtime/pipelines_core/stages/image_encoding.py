@@ -26,8 +26,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
-)
-from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     VerificationResult,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
@@ -207,7 +205,8 @@ class ImageVAEEncodingStage(PipelineStage):
         if batch.condition_image is None:
             return batch
 
-        num_frames = batch.num_frames
+        # num_frames = batch.num_frames
+        num_frames = 1
 
         self.vae = self.vae.to(get_local_torch_device())
 
@@ -295,6 +294,8 @@ class ImageVAEEncodingStage(PipelineStage):
         )
 
         self.maybe_free_model_hooks()
+
+        logger.info(f"[HZ] image_latent: {batch.image_latent.shape}")
 
         self.vae.to("cpu")
 
