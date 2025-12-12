@@ -677,6 +677,7 @@ class CLIPVisionModel(ImageEncoder):
         output_hidden_states: Optional[bool] = None,
         **kwargs,
     ) -> BaseEncoderOutput:
+        assert output_hidden_states
         base_encoder_output = self.vision_model(
             pixel_values,
             output_hidden_states=output_hidden_states,

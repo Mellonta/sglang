@@ -72,6 +72,11 @@ class WanAnimatePipeline(ComposedPipelineBase):
             ),
         )
 
+        self.add_stage(
+            stage_name="image_latent_preparation_stage",
+            stage=ImageVAEEncodingStage(vae=self.get_module("vae")),
+        )
+
         self.add_stage(stage_name="conditioning_stage", stage=ConditioningStage())
 
         self.add_stage(
@@ -82,11 +87,6 @@ class WanAnimatePipeline(ComposedPipelineBase):
         self.add_stage(
             stage_name="timestep_preparation_stage",
             stage=TimestepPreparationStage(scheduler=self.get_module("scheduler")),
-        )
-
-        self.add_stage(
-            stage_name="image_latent_preparation_stage",
-            stage=ImageVAEEncodingStage(vae=self.get_module("vae")),
         )
 
         self.add_stage(

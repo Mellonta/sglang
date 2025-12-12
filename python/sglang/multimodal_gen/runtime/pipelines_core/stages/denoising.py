@@ -14,6 +14,7 @@ from functools import lru_cache
 from typing import Any, Optional, Union
 
 import torch
+from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from einops import rearrange
 
 from sglang.multimodal_gen import envs
@@ -57,7 +58,7 @@ from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
 from sglang.multimodal_gen.runtime.utils.profiler import SGLDiffusionProfiler
-from sglang.multimodal_gen.utils import dict_to_3d_list, masks_like
+from sglang.multimodal_gen.utils import dict_to_3d_list, masks_like, PRECISION_TO_TYPE
 from tqdm.auto import tqdm
 
 try:
@@ -911,8 +912,81 @@ class DenoisingStage(PipelineStage):
 
         return mask_lat_size
 
+    def encode(
+        self,
+        video_condition: torch.Tensor,
+        batch: Req,
+        server_args: ServerArgs,
+    ) -> torch.Tensor:
+        # Setup VAE precision
+        vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
+        vae_autocast_enabled = (
+            vae_dtype != torch.float32
+        ) and not server_args.disable_autocast
+
+        # Encode Image
+        with torch.autocast(
+            device_type="cuda", dtype=vae_dtype, enabled=vae_autocast_enabled
+        ):
+            if server_args.pipeline_config.vae_tiling:
+                self.vae.enable_tiling()
+            if not vae_autocast_enabled:
+                video_condition = video_condition.to(vae_dtype)
+            encoder_output: DiagonalGaussianDistribution = self.vae.encode(
+                video_condition
+            )
+
+        generator = batch.generator
+
+        sample_mode = server_args.pipeline_config.vae_config.encode_sample_mode()
+
+        latent_condition = self.retrieve_latents(
+            encoder_output, generator, sample_mode=sample_mode
+        )
+        latent_condition = server_args.pipeline_config.postprocess_vae_encode(
+            latent_condition, self.vae
+        )
+
+        scaling_factor, shift_factor = (
+            server_args.pipeline_config.get_decode_scale_and_shift(
+                device=latent_condition.device,
+                dtype=latent_condition.dtype,
+                vae=self.vae,
+            )
+        )
+
+        # apply shift & scale if needed
+        if isinstance(shift_factor, torch.Tensor):
+            shift_factor = shift_factor.to(latent_condition.device)
+
+        if isinstance(scaling_factor, torch.Tensor):
+            scaling_factor = scaling_factor.to(latent_condition.device)
+
+        latent_condition -= shift_factor
+        latent_condition = latent_condition * scaling_factor
+
+        # output = server_args.pipeline_config.postprocess_image_latent(
+        #     latent_condition, batch
+        # )
+        return latent_condition
+
+    def retrieve_latents(
+        self,
+        encoder_output: DiagonalGaussianDistribution,
+        generator: torch.Generator | None = None,
+        sample_mode: str = "sample",
+    ):
+        if sample_mode == "sample":
+            return encoder_output.sample(generator)
+        elif sample_mode == "argmax":
+            return encoder_output.mode()
+        else:
+            raise AttributeError("Could not access latents of provided encoder_output")
+
     def prepare_prev_segment_cond_latents(
         self,
+        batch,
+        server_args,
         batch_size: int = 1,
         segment_frame_length: int = 77,
         start_frame: int = 0,
@@ -976,9 +1050,12 @@ class DenoisingStage(PipelineStage):
         )
 
         self.vae = self.vae.to(get_local_torch_device())
-        prev_segment_cond_latents = self.vae.encode(
-            full_segment_cond_video.float()
-        ).mean.float()
+        prev_segment_cond_latents = self.encode(
+            full_segment_cond_video, batch, server_args
+        )
+        # prev_segment_cond_latents = self.vae.encode(
+        #     full_segment_cond_video.float()
+        # ).mean.float()
         self.vae = self.vae.to("cpu")
         # Standardize latents in preparation for Wan VAE encode
         # latents_mean = prev_segment_cond_latents.view(
@@ -1088,13 +1165,15 @@ class DenoisingStage(PipelineStage):
                             logger.info(
                                 f"[HZ] {latent_model_input.shape=} {batch.image_latent.shape=}"
                             )
-                            aa = self.prepare_prev_segment_cond_latents()
-                            a = torch.zeros(
-                                [1, 20, 20, 90, 160],
-                                device=get_local_torch_device(),
-                                dtype=latent_model_input.dtype,
+                            aa = self.prepare_prev_segment_cond_latents(
+                                batch, server_args
                             )
-                            logger.info(f"[HZ] {aa=}")
+                            # a = torch.zeros(
+                            #     [1, 20, 20, 90, 160],
+                            #     device=get_local_torch_device(),
+                            #     dtype=latent_model_input.dtype,
+                            # )
+                            # logger.info(f"[HZ] {aa=}")
                             a = torch.cat([batch.image_latent, aa], dim=2).to(
                                 target_dtype
                             )

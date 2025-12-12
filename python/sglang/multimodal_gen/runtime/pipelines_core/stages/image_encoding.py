@@ -155,6 +155,8 @@ class ImageEncodingStage(PipelineStage):
 
         self.move_to_device("cpu")
 
+        logger.info(f"[HZ] {len(batch.image_embeds)=} {batch.image_embeds[0].shape=}")
+
         return batch
 
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
@@ -294,8 +296,6 @@ class ImageVAEEncodingStage(PipelineStage):
         )
 
         self.maybe_free_model_hooks()
-
-        logger.info(f"[HZ] image_latent: {batch.image_latent.shape}")
 
         self.vae.to("cpu")
 

@@ -205,21 +205,12 @@ class Wan2_2_Animate_14B_Config(WanI2V480PConfig):
     flow_shift: float | None = 5.0
     boundary_ratio: float | None = 0.900
 
-    # vae_stride = (4, 16, 16)
-    # def preprocess_image(self, image, image_processor: VaeImageProcessor):
-    # return image_processor.preprocess(image)
+    def post_denoising_loop(self, latents, batch):
+        logger.info(f"[HZ] {latents.shape=}")
+        return latents[:, :, 1:]
 
     def __post_init__(self) -> None:
         super().__post_init__()
-
-    # def prepare_latent_shape(self, batch, batch_size, num_frames):
-    #     # F = num_frames
-    #     z_dim = self.vae_config.arch_config.z_dim
-    #     vae_stride = self.vae_stride
-    #     oh = batch.height
-    #     ow = batch.width
-    #     shape = (batch_size, z_dim, 1, oh // vae_stride[1], ow // vae_stride[2])
-    #     return shape
 
 
 # =============================================
